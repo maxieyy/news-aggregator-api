@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# News Aggregator API - Interactive Deployment Script
+# News Aggregator API - Production Deployment Script
 set -e
 
 # Colors for output
@@ -16,35 +16,41 @@ UNDERLINE='\033[4m'
 
 # Text formatting functions
 header() {
-    echo -e "${MAGENTA}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${MAGENTA}║${NC} ${BOLD}News Aggregator API - Deployment Script${NC} ${MAGENTA}║${NC}"
-    echo -e "${MAGENTA}╚════════════════════════════════════════════════════════════╝${NC}"
+    clear
+    echo -e "${MAGENTA}╔══════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${MAGENTA}║${NC} ${BOLD}NEWS AGGREGATOR API - PRODUCTION DEPLOYMENT${NC} ${MAGENTA}               ║${NC}"
+    echo -e "${MAGENTA}╚══════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
 
 log() {
-    echo -e "${GREEN}✓${NC} ${GREEN}[$(date +'%H:%M:%S')]${NC} $1"
+    echo -e "${GREEN}[✓]${NC} $1"
 }
 
 warn() {
-    echo -e "${YELLOW}⚠${NC} ${YELLOW}[$(date +'%H:%M:%S')]${NC} $1"
+    echo -e "${YELLOW}[!]${NC} $1"
 }
 
 error() {
-    echo -e "${RED}✗${NC} ${RED}[$(date +'%H:%M:%S')] ERROR:${NC} $1"
+    echo -e "${RED}[✗] ERROR:${NC} $1"
     exit 1
 }
 
 info() {
-    echo -e "${BLUE}ℹ${NC} ${BLUE}[$(date +'%H:%M:%S')]${NC} $1"
+    echo -e "${BLUE}[i]${NC} $1"
 }
 
 prompt() {
-    echo -e "${CYAN}?${NC} ${CYAN}[$(date +'%H:%M:%S')]${NC} $1"
+    echo -e "${CYAN}[?]${NC} $1"
 }
 
 success() {
-    echo -e "${GREEN}🎉${NC} ${GREEN}[$(date +'%H:%M:%S')]${NC} ${BOLD}$1${NC}"
+    echo -e "${GREEN}[✓] SUCCESS:${NC} ${BOLD}$1${NC}"
+}
+
+step() {
+    echo ""
+    echo -e "${YELLOW}▸${NC} ${BOLD}$1${NC}"
 }
 
 # Check if running as root
@@ -54,316 +60,430 @@ check_root() {
     fi
 }
 
-# Detect VPS IP address
-detect_ip() {
-    info "Detecting VPS IP address..."
-    local public_ip=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || echo "156.251.65.243")
-    local private_ip=$(hostname -I | awk '{print $1}')
+# Detect system information
+detect_system() {
+    info "Detecting system information..."
     
-    echo -e "${CYAN}Detected IP Addresses:${NC}"
-    echo -e "  ${BOLD}Public IP:${NC}  $public_ip"
-    echo -e "  ${BOLD}Private IP:${NC} $private_ip"
+    # Get VPS IP
+    VPS_PUBLIC_IP=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || echo "156.251.65.243")
+    VPS_PRIVATE_IP=$(hostname -I | awk '{print $1}')
+    
+    # Get OS info
+    OS_NAME=$(lsb_release -si 2>/dev/null || echo "Debian")
+    OS_VERSION=$(lsb_release -sr 2>/dev/null || echo "12")
+    
+    echo -e "${CYAN}System Information:${NC}"
+    echo -e "  ${BOLD}OS:${NC}          $OS_NAME $OS_VERSION"
+    echo -e "  ${BOLD}Public IP:${NC}   $VPS_PUBLIC_IP"
+    echo -e "  ${BOLD}Private IP:${NC}  $VPS_PRIVATE_IP"
+    echo -e "  ${BOLD}Hostname:${NC}    $(hostname)"
     echo ""
-    
-    VPS_PUBLIC_IP="$public_ip"
-    VPS_PRIVATE_IP="$private_ip"
 }
 
-# Check for existing SSL certificates
-check_ssl() {
-    info "Checking for existing SSL certificates..."
+# Check for existing services
+check_existing_services() {
+    info "Checking for existing services..."
     
-    local cert_paths=(
-        "/etc/letsencrypt/live/"
-        "/etc/ssl/certs/"
-        "/etc/nginx/ssl/"
-    )
+    local conflicts=()
     
-    local domains=()
+    # Check for existing web servers
+    if systemctl is-active --quiet apache2; then
+        conflicts+=("Apache2")
+    fi
     
-    for path in "${cert_paths[@]}"; do
-        if [ -d "$path" ]; then
-            for dir in "$path"*/; do
-                if [ -f "${dir}fullchain.pem" ] && [ -f "${dir}privkey.pem" ]; then
-                    local domain=$(basename "$dir")
-                    domains+=("$domain")
-                    log "Found SSL certificate for: ${BOLD}$domain${NC}"
-                fi
-            done
+    if systemctl is-active --quiet nginx; then
+        conflicts+=("Nginx")
+    fi
+    
+    # Check port conflicts
+    if netstat -tulpn | grep -q ":80 "; then
+        conflicts+=("Port 80 (HTTP) in use")
+    fi
+    
+    if netstat -tulpn | grep -q ":443 "; then
+        conflicts+=("Port 443 (HTTPS) in use")
+    fi
+    
+    if netstat -tulpn | grep -q ":8000 "; then
+        conflicts+=("Port 8000 (API) in use")
+    fi
+    
+    if [ ${#conflicts[@]} -gt 0 ]; then
+        warn "Potential conflicts detected:"
+        for conflict in "${conflicts[@]}"; do
+            echo -e "  ${YELLOW}•${NC} $conflict"
+        done
+        echo ""
+        prompt "Do you want to continue anyway? (y/N): "
+        read -r continue_anyway
+        if [[ ! "$continue_anyway" =~ ^[Yy]$ ]]; then
+            error "Deployment cancelled due to conflicts"
+        fi
+    fi
+}
+
+# Get user configuration
+get_configuration() {
+    echo -e "${CYAN}════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}Configuration Setup${NC}"
+    echo -e "${CYAN}════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    # Domain configuration
+    while true; do
+        prompt "Enter your domain name (e.g., news.devmaxwell.site): "
+        read -r DOMAIN
+        
+        if [[ -z "$DOMAIN" ]]; then
+            warn "Domain name cannot be empty"
+            continue
+        fi
+        
+        if [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            warn "IP address detected. For SSL certificates, you need a domain name."
+            prompt "Continue with IP address? (y/N): "
+            read -r use_ip
+            if [[ "$use_ip" =~ ^[Yy]$ ]]; then
+                NO_SSL=true
+                break
+            fi
+            continue
+        fi
+        
+        # Validate domain format
+        if [[ "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z]{2,})+$ ]]; then
+            break
+        else
+            warn "Invalid domain format. Please enter a valid domain name."
         fi
     done
     
-    if [ ${#domains[@]} -eq 0 ]; then
-        warn "No SSL certificates found"
-        return 1
-    fi
-    
-    echo ""
-    echo -e "${CYAN}Available SSL Certificates:${NC}"
-    for i in "${!domains[@]}"; do
-        echo -e "  ${BOLD}$((i+1)).${NC} ${domains[$i]}"
-    done
-    
-    echo ""
-    prompt "Select a certificate number or press Enter to use your own domain: "
-    read -r selection
-    
-    if [[ -n "$selection" && "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -le ${#domains[@]} ]; then
-        SELECTED_DOMAIN="${domains[$((selection-1))]}"
-        log "Selected domain: ${BOLD}$SELECTED_DOMAIN${NC}"
-        return 0
-    fi
-    
-    return 1
-}
-
-# Prompt for domain name
-get_domain() {
-    echo ""
-    echo -e "${YELLOW}────────────────────────────────────────────────────────────${NC}"
-    echo -e "${CYAN}Domain Configuration${NC}"
-    echo -e "${YELLOW}────────────────────────────────────────────────────────────${NC}"
-    
-    if [ -n "$SELECTED_DOMAIN" ]; then
-        DOMAIN="$SELECTED_DOMAIN"
-        info "Using existing SSL certificate for: ${BOLD}$DOMAIN${NC}"
-        return
-    fi
-    
-    echo ""
-    echo -e "Your VPS IP address is: ${BOLD}$VPS_PUBLIC_IP${NC}"
-    echo ""
-    warn "For SSL certificates, you need a domain name pointing to this IP."
-    echo ""
-    info "Options:"
-    echo -e "  1. ${BOLD}Use IP address${NC} (no SSL, HTTP only)"
-    echo -e "  2. ${BOLD}Enter domain name${NC} (with SSL setup)"
-    echo -e "  3. ${BOLD}Skip SSL for now${NC} (setup later)"
     echo ""
     
-    while true; do
-        prompt "Enter your choice (1-3): "
-        read -r choice
+    # SSL configuration
+    if [ "$NO_SSL" != true ]; then
+        info "SSL Certificate Setup"
+        echo -e "  You need a domain name pointing to: ${BOLD}$VPS_PUBLIC_IP${NC}"
+        echo ""
+        warn "Before proceeding, ensure:"
+        echo -e "  1. DNS record for ${BOLD}$DOMAIN${NC} points to ${BOLD}$VPS_PUBLIC_IP${NC}"
+        echo -e "  2. Ports 80 and 443 are open in firewall"
+        echo ""
         
-        case $choice in
-            1)
-                DOMAIN="$VPS_PUBLIC_IP"
-                warn "Using IP address: ${BOLD}$DOMAIN${NC} (No SSL)"
-                echo -e "  API will be available at: ${YELLOW}http://$DOMAIN${NC}"
-                NO_SSL=true
-                break
-                ;;
-            2)
-                prompt "Enter your domain name (e.g., news.devmaxwell.site): "
-                read -r DOMAIN
+        prompt "Do you want to setup SSL certificate now? (Y/n): "
+        read -r setup_ssl
+        setup_ssl=${setup_ssl:-Y}
+        
+        if [[ "$setup_ssl" =~ ^[Yy]$ ]]; then
+            SETUP_SSL=true
+            
+            # Get email for SSL
+            while true; do
+                prompt "Enter email for SSL certificate (required by Let's Encrypt): "
+                read -r SSL_EMAIL
                 
-                if [[ -z "$DOMAIN" ]]; then
-                    warn "Domain cannot be empty"
+                if [[ -z "$SSL_EMAIL" ]]; then
+                    warn "Email is required for SSL certificate"
                     continue
                 fi
                 
-                log "Using domain: ${BOLD}$DOMAIN${NC}"
-                
-                # Ask about SSL setup
-                echo ""
-                prompt "Do you want to setup SSL certificate now? (y/N): "
-                read -r setup_ssl
-                
-                if [[ "$setup_ssl" =~ ^[Yy]$ ]]; then
-                    SETUP_SSL=true
+                if [[ "$SSL_EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+                    break
                 else
-                    warn "SSL setup skipped. You can setup SSL later with:"
-                    echo -e "  ${BOLD}certbot --nginx -d $DOMAIN${NC}"
+                    warn "Invalid email format"
                 fi
-                break
-                ;;
-            3)
-                DOMAIN="$VPS_PUBLIC_IP"
-                warn "SSL setup skipped. Using IP: ${BOLD}$DOMAIN${NC}"
-                echo -e "  You can setup SSL later with certbot"
-                NO_SSL=true
-                break
-                ;;
-            *)
-                warn "Invalid choice. Please enter 1, 2, or 3"
-                ;;
-        esac
-    done
+            done
+        else
+            warn "SSL setup skipped. API will run on HTTP only."
+            NO_SSL=true
+        fi
+    fi
+    
+    # API Key
+    echo ""
+    info "API Security Configuration"
+    API_KEY="MAX_Nwstdy21onetwditwdi6"
+    echo -e "  ${BOLD}Default API Key:${NC} $API_KEY"
+    
+    prompt "Do you want to generate a new API key? (y/N): "
+    read -r new_key
+    if [[ "$new_key" =~ ^[Yy]$ ]]; then
+        API_KEY=$(openssl rand -hex 24)
+        echo -e "  ${BOLD}New API Key:${NC} $API_KEY"
+    fi
+    
+    # OpenAI API Key
+    echo ""
+    prompt "Do you have an OpenAI API key for AI summarization? (y/N): "
+    read -r has_openai
+    if [[ "$has_openai" =~ ^[Yy]$ ]]; then
+        prompt "Enter your OpenAI API key: "
+        read -r OPENAI_API_KEY
+    else
+        OPENAI_API_KEY="your-openai-api-key-here"
+        warn "AI summarization will be disabled until you add an OpenAI API key"
+    fi
+    
+    # Confirm configuration
+    echo ""
+    echo -e "${CYAN}════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}Configuration Summary${NC}"
+    echo -e "${CYAN}════════════════════════════════════════════════════════════${NC}"
+    echo -e "  ${BOLD}Domain:${NC}        $DOMAIN"
+    echo -e "  ${BOLD}SSL:${NC}           $(if [ "$NO_SSL" = true ]; then echo "Disabled (HTTP)"; else echo "Enabled (HTTPS)"; fi)"
+    if [ "$SETUP_SSL" = true ]; then
+        echo -e "  ${BOLD}SSL Email:${NC}     $SSL_EMAIL"
+    fi
+    echo -e "  ${BOLD}API Key:${NC}       $API_KEY"
+    echo -e "  ${BOLD}OpenAI Key:${NC}    $(if [ "$OPENAI_API_KEY" = "your-openai-api-key-here" ]; then echo "Not configured"; else echo "Configured"; fi)"
+    echo ""
+    
+    prompt "Continue with this configuration? (Y/n): "
+    read -r confirm
+    confirm=${confirm:-Y}
+    
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        error "Deployment cancelled by user"
+    fi
 }
 
 # Install system dependencies
 install_dependencies() {
-    info "Installing system dependencies..."
+    step "Installing System Dependencies"
     
-    apt update 2>/dev/null | grep -v "Reading package lists"
-    apt install -y \
+    info "Updating package lists..."
+    apt-get update -q 2>/dev/null
+    
+    info "Installing core dependencies..."
+    apt-get install -y -q \
+        software-properties-common \
+        curl \
+        wget \
+        gnupg \
+        ca-certificates \
+        lsb-release \
+        apt-transport-https 2>/dev/null
+    
+    # Add Python repository for Python 3.11
+    if ! apt-cache policy python3.11 | grep -q "Installed"; then
+        info "Adding Python 3.11 repository..."
+        add-apt-repository -y ppa:deadsnakes/ppa 2>/dev/null
+        apt-get update -q 2>/dev/null
+    fi
+    
+    info "Installing Python and tools..."
+    apt-get install -y -q \
         python3.11 \
         python3.11-venv \
         python3.11-dev \
         python3-pip \
-        git \
+        python3.11-distutils 2>/dev/null
+    
+    info "Installing web server and database..."
+    apt-get install -y -q \
         nginx \
         redis-server \
         sqlite3 \
+        supervisor 2>/dev/null
+    
+    info "Installing development libraries..."
+    apt-get install -y -q \
+        build-essential \
         libssl-dev \
         libffi-dev \
         libxml2-dev \
         libxslt1-dev \
         libjpeg-dev \
         libpng-dev \
-        zlib1g-dev 2>/dev/null | grep -v "Reading package lists"
+        zlib1g-dev 2>/dev/null
     
-    log "System dependencies installed"
+    info "Installing Git..."
+    apt-get install -y -q git 2>/dev/null
+    
+    log "System dependencies installed successfully"
 }
 
 # Setup SSL certificate
-setup_ssl_certificate() {
-    if [ "$NO_SSL" = true ] || [ "$SETUP_SSL" != true ]; then
+setup_ssl() {
+    if [ "$SETUP_SSL" != true ]; then
         return
     fi
     
-    info "Setting up SSL certificate for: ${BOLD}$DOMAIN${NC}"
+    step "Setting up SSL Certificate"
     
-    # Check if certbot is installed
-    if ! command -v certbot &> /dev/null; then
-        log "Installing certbot..."
-        apt install -y certbot python3-certbot-nginx 2>/dev/null | grep -v "Reading package lists"
+    info "Installing Certbot..."
+    apt-get install -y -q certbot python3-certbot-nginx 2>/dev/null
+    
+    info "Checking DNS resolution..."
+    local dns_check=$(dig +short "$DOMAIN" | head -1)
+    if [[ -z "$dns_check" ]]; then
+        warn "DNS resolution failed for $DOMAIN"
+        warn "Please ensure DNS is properly configured before continuing"
+        prompt "Continue anyway? (y/N): "
+        read -r continue_ssl
+        if [[ ! "$continue_ssl" =~ ^[Yy]$ ]]; then
+            NO_SSL=true
+            return
+        fi
+    else
+        log "DNS resolved to: $dns_check"
     fi
     
-    # Stop nginx temporarily for standalone verification
-    systemctl stop nginx
+    info "Stopping Nginx for certificate verification..."
+    systemctl stop nginx 2>/dev/null || true
     
+    info "Obtaining SSL certificate..."
     echo ""
-    prompt "Enter email for SSL certificate notifications: "
-    read -r ssl_email
+    echo -e "${YELLOW}Certbot will now obtain your SSL certificate...${NC}"
+    echo ""
     
-    if [[ -z "$ssl_email" ]]; then
-        ssl_email="admin@$DOMAIN"
-        warn "Using default email: ${BOLD}$ssl_email${NC}"
-    fi
-    
-    log "Obtaining SSL certificate..."
-    
-    if certbot certonly --standalone -d "$DOMAIN" \
+    if certbot certonly --standalone \
+        -d "$DOMAIN" \
         --non-interactive \
         --agree-tos \
-        --email "$ssl_email" \
+        --email "$SSL_EMAIL" \
         --preferred-challenges http \
         --http-01-port 8080; then
-        log "SSL certificate obtained successfully"
+        success "SSL certificate obtained successfully"
         SSL_CERT_PATH="/etc/letsencrypt/live/$DOMAIN"
     else
         warn "Failed to obtain SSL certificate automatically"
         echo ""
-        info "You can manually setup SSL later with:"
-        echo -e "  ${BOLD}1.${NC} Make sure DNS points to: ${BOLD}$VPS_PUBLIC_IP${NC}"
+        info "You can try manually:"
+        echo -e "  ${BOLD}1.${NC} Ensure DNS points to: ${BOLD}$VPS_PUBLIC_IP${NC}"
         echo -e "  ${BOLD}2.${NC} Run: ${BOLD}certbot --nginx -d $DOMAIN${NC}"
-        echo -e "  ${BOLD}3.${NC} Or: ${BOLD}certbot certonly --standalone -d $DOMAIN${NC}"
-        NO_SSL=true
+        echo ""
+        prompt "Continue without SSL? (Y/n): "
+        read -r continue_without_ssl
+        continue_without_ssl=${continue_without_ssl:-Y}
+        if [[ "$continue_without_ssl" =~ ^[Yy]$ ]]; then
+            NO_SSL=true
+        else
+            error "SSL setup failed. Please check DNS and try again."
+        fi
     fi
     
-    # Restart nginx
-    systemctl start nginx
+    info "Starting Nginx..."
+    systemctl start nginx 2>/dev/null || true
 }
 
-# Clone or update repository
-setup_repository() {
-    info "Setting up application repository..."
+# Setup application
+setup_application() {
+    step "Setting up Application"
     
-    if [ ! -d "$APP_DIR" ]; then
-        log "Creating application directory..."
-        mkdir -p "$APP_DIR"
-    fi
+    # Variables
+    APP_NAME="news-aggregator-api"
+    APP_DIR="/var/www/$APP_NAME"
+    VENV_DIR="$APP_DIR/venv"
+    USER="www-data"
+    GITHUB_REPO="https://github.com/maxieyy/news-aggregator-api.git"
     
+    # Create application directory
+    info "Creating application directory..."
+    mkdir -p "$APP_DIR"
     cd "$APP_DIR"
     
+    # Clone repository
     if [ ! -d ".git" ]; then
-        log "Cloning repository from GitHub..."
-        git clone "$GITHUB_REPO" . 2>&1 | while read line; do
-            echo -ne "${BLUE}${line}${NC}\r"
-        done
-        echo ""
+        info "Cloning repository..."
+        git clone "$GITHUB_REPO" . 2>&1 | grep -E "(Cloning|Receiving|Resolving)" || true
+        log "Repository cloned"
     else
-        log "Pulling latest changes..."
-        git pull origin main 2>&1 | while read line; do
-            echo -ne "${BLUE}${line}${NC}\r"
-        done
-        echo ""
+        info "Updating repository..."
+        git pull origin main 2>&1 | grep -E "(Already|Updating|Fast-forward)" || true
+        log "Repository updated"
     fi
-}
-
-# Setup Python virtual environment
-setup_python_env() {
-    info "Setting up Python environment..."
     
+    # Create Python virtual environment
+    info "Setting up Python virtual environment..."
     if [ ! -d "$VENV_DIR" ]; then
-        log "Creating Python virtual environment..."
         python3.11 -m venv "$VENV_DIR"
+        log "Virtual environment created"
     fi
     
-    log "Activating virtual environment..."
+    # Activate and install dependencies
+    info "Installing Python dependencies..."
     source "$VENV_DIR/bin/activate"
     
-    log "Upgrading pip..."
-    pip install --upgrade pip | grep -v "Requirement already satisfied"
+    # Upgrade pip first
+    pip install --upgrade pip 2>&1 | grep -v "already satisfied" || true
     
-    log "Installing Python dependencies..."
+    # Install dependencies
     if [ -f "requirements.txt" ]; then
-        pip install -r requirements.txt | grep -v "Requirement already satisfied"
+        pip install -r requirements.txt 2>&1 | grep -E "(Collecting|Installing|Successfully)" || true
         log "Python dependencies installed"
     else
-        warn "requirements.txt not found"
-        info "Installing basic dependencies..."
-        pip install fastapi uvicorn sqlalchemy redis celery feedparser requests | grep -v "Requirement already satisfied"
+        warn "requirements.txt not found, installing basic dependencies..."
+        pip install fastapi uvicorn sqlalchemy redis celery feedparser requests 2>&1 | grep -E "(Collecting|Installing|Successfully)" || true
     fi
-}
-
-# Setup application directories
-setup_directories() {
-    info "Setting up application directories..."
     
     # Create necessary directories
+    info "Creating directories..."
     mkdir -p "$APP_DIR/storage/media/images"
     mkdir -p "$APP_DIR/storage/media/videos"
     mkdir -p "$APP_DIR/storage/cache"
     mkdir -p "$APP_DIR/logs"
     mkdir -p "$APP_DIR/static"
     
+    # Create environment file
+    info "Creating environment configuration..."
+    cat > "$APP_DIR/.env" << EOF
+# API Configuration
+API_KEY=$API_KEY
+API_KEY_NAME=X-API-Key
+SECRET_KEY=$(openssl rand -hex 32)
+DEBUG=False
+
+# Database
+DATABASE_URL=sqlite:///$APP_DIR/news.db
+
+# Redis
+REDIS_URL=redis://localhost:6379/0
+
+# AI Configuration
+OPENAI_API_KEY=$OPENAI_API_KEY
+OPENAI_MODEL=gpt-3.5-turbo-1106
+AI_SUMMARIZE=True
+
+# Storage Paths
+MEDIA_STORAGE_PATH=$APP_DIR/storage/media
+CACHE_PATH=$APP_DIR/storage/cache
+
+# Server
+HOST=0.0.0.0
+PORT=8000
+DOMAIN=$(if [ "$NO_SSL" = true ]; then echo "http://$DOMAIN"; else echo "https://$DOMAIN"; fi)
+
+# Settings
+FETCH_DELAY=1.0
+MAX_CONCURRENT_FETCHES=5
+EOF
+    
     # Set permissions
     chown -R $USER:$USER "$APP_DIR"
-    chmod -R 755 "$APP_DIR"
-    chmod +x "$APP_DIR/deploy.sh" 2>/dev/null || true
+    chmod 755 "$APP_DIR"
+    chmod 600 "$APP_DIR/.env"
     
-    log "Directories created and permissions set"
+    log "Application setup completed"
 }
 
-# Create systemd service files
-create_systemd_services() {
-    info "Creating systemd services..."
+# Configure services
+configure_services() {
+    step "Configuring Services"
     
-    # Redis service (if not exists)
-    if [ ! -f "/etc/systemd/system/redis-server.service" ]; then
-        log "Creating Redis service..."
-        cat > /etc/systemd/system/redis-server.service << EOF
-[Unit]
-Description=Redis In-Memory Data Store
-After=network.target
-
-[Service]
-Type=exec
-User=redis
-Group=redis
-ExecStart=/usr/bin/redis-server /etc/redis/redis.conf
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    fi
+    APP_DIR="/var/www/news-aggregator-api"
+    VENV_DIR="$APP_DIR/venv"
+    USER="www-data"
     
-    # News API service
-    log "Creating News API service..."
+    # Configure Redis
+    info "Configuring Redis..."
+    sed -i 's/^supervised no/supervised systemd/' /etc/redis/redis.conf 2>/dev/null || true
+    systemctl enable redis-server
+    systemctl restart redis-server
+    log "Redis configured"
+    
+    # Create systemd service for API
+    info "Creating API service..."
     cat > /etc/systemd/system/news-api.service << EOF
 [Unit]
 Description=News Aggregator API
@@ -376,7 +496,8 @@ User=$USER
 Group=$USER
 WorkingDirectory=$APP_DIR
 Environment="PATH=$VENV_DIR/bin"
-ExecStart=$VENV_DIR/bin/uvicorn src.main:app --host 0.0.0.0 --port 8000 --workers 2
+EnvironmentFile=$APP_DIR/.env
+ExecStart=$VENV_DIR/bin/uvicorn src.main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=10
 StandardOutput=append:$APP_DIR/logs/api.log
@@ -386,8 +507,8 @@ StandardError=append:$APP_DIR/logs/api-error.log
 WantedBy=multi-user.target
 EOF
     
-    # Celery worker service
-    log "Creating Celery worker service..."
+    # Create systemd service for worker
+    info "Creating worker service..."
     cat > /etc/systemd/system/news-worker.service << EOF
 [Unit]
 Description=News Aggregator Celery Worker
@@ -400,7 +521,8 @@ User=$USER
 Group=$USER
 WorkingDirectory=$APP_DIR
 Environment="PATH=$VENV_DIR/bin"
-ExecStart=$VENV_DIR/bin/celery -A src.tasks.worker.celery_app worker --loglevel=info --concurrency=2
+EnvironmentFile=$APP_DIR/.env
+ExecStart=$VENV_DIR/bin/celery -A src.tasks.worker.celery_app worker --loglevel=info
 Restart=always
 RestartSec=10
 StandardOutput=append:$APP_DIR/logs/worker.log
@@ -410,8 +532,8 @@ StandardError=append:$APP_DIR/logs/worker-error.log
 WantedBy=multi-user.target
 EOF
     
-    # Scheduler service
-    log "Creating scheduler service..."
+    # Create systemd service for scheduler
+    info "Creating scheduler service..."
     cat > /etc/systemd/system/news-scheduler.service << EOF
 [Unit]
 Description=News Aggregator Scheduler
@@ -424,6 +546,7 @@ User=$USER
 Group=$USER
 WorkingDirectory=$APP_DIR
 Environment="PATH=$VENV_DIR/bin"
+EnvironmentFile=$APP_DIR/.env
 ExecStart=$VENV_DIR/bin/python -m src.core.scheduler
 Restart=always
 RestartSec=10
@@ -433,23 +556,32 @@ StandardError=append:$APP_DIR/logs/scheduler-error.log
 [Install]
 WantedBy=multi-user.target
 EOF
+    
+    # Reload systemd
+    systemctl daemon-reload
+    
+    log "Services configured"
 }
 
 # Configure Nginx
 configure_nginx() {
-    info "Configuring Nginx..."
+    step "Configuring Nginx"
     
-    # Create nginx config directory if not exists
-    mkdir -p /etc/nginx/sites-available
-    mkdir -p /etc/nginx/sites-enabled
+    APP_DIR="/var/www/news-aggregator-api"
+    
+    # Remove default site
+    rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+    
+    # Create nginx configuration
+    info "Creating Nginx configuration..."
     
     if [ "$NO_SSL" = true ]; then
-        # HTTP only configuration
-        log "Creating HTTP-only Nginx configuration..."
+        # HTTP configuration
         cat > /etc/nginx/sites-available/news-api << EOF
 server {
     listen 80;
     server_name $DOMAIN;
+    client_max_body_size 100M;
     
     # Security headers
     add_header X-Frame-Options DENY;
@@ -464,9 +596,9 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
         
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
+        proxy_connect_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
     }
     
     # Static files
@@ -489,22 +621,15 @@ server {
         access_log off;
     }
     
-    # Root redirect to API docs
+    # Root redirect
     location / {
         return 302 /api/v1/;
     }
 }
 EOF
+        log "HTTP configuration created"
     else
         # HTTPS configuration
-        log "Creating HTTPS Nginx configuration..."
-        
-        if [ -d "/etc/letsencrypt/live/$DOMAIN" ]; then
-            SSL_CERT_PATH="/etc/letsencrypt/live/$DOMAIN"
-        else
-            SSL_CERT_PATH="/etc/ssl/certs"
-        fi
-        
         cat > /etc/nginx/sites-available/news-api << EOF
 # HTTP redirect to HTTPS
 server {
@@ -517,20 +642,23 @@ server {
 server {
     listen 443 ssl http2;
     server_name $DOMAIN;
-
-    ssl_certificate $SSL_CERT_PATH/fullchain.pem;
-    ssl_certificate_key $SSL_CERT_PATH/privkey.pem;
+    client_max_body_size 100M;
     
+    # SSL certificates
+    ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+    
+    # SSL configuration
     ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-RSA-AES256-GCM-SHA512:DHE-RSA-AES256-GCM-SHA512;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
     ssl_prefer_server_ciphers off;
-
+    
     # Security headers
     add_header X-Frame-Options DENY;
     add_header X-Content-Type-Options nosniff;
     add_header X-XSS-Protection "1; mode=block";
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-
+    
     # API proxy
     location /api/ {
         proxy_pass http://127.0.0.1:8000;
@@ -539,57 +667,92 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
         
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
+        proxy_connect_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
     }
-
+    
     # Static files
     location /static/ {
         alias $APP_DIR/static/;
         expires 30d;
         add_header Cache-Control "public, immutable";
     }
-
+    
     # Media files
     location /media/ {
         alias $APP_DIR/storage/media/;
         expires 7d;
         add_header Cache-Control "public";
     }
-
+    
     # Health check
     location /health {
         proxy_pass http://127.0.0.1:8000/health;
         access_log off;
     }
     
-    # Root redirect to API docs
+    # Root redirect
     location / {
         return 302 /api/v1/;
     }
 }
 EOF
+        log "HTTPS configuration created"
     fi
     
     # Enable site
     ln -sf /etc/nginx/sites-available/news-api /etc/nginx/sites-enabled/
     
-    # Remove default nginx site
-    rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
-    
-    # Test nginx configuration
-    log "Testing Nginx configuration..."
-    if nginx -t; then
+    # Test Nginx configuration
+    info "Testing Nginx configuration..."
+    if nginx -t 2>/dev/null; then
         log "Nginx configuration test passed"
     else
-        error "Nginx configuration test failed"
+        warn "Nginx configuration test failed, checking error..."
+        nginx -t
+        error "Fix Nginx configuration before continuing"
+    fi
+    
+    # Enable and start Nginx
+    systemctl enable nginx
+    systemctl restart nginx
+    log "Nginx configured and started"
+}
+
+# Setup firewall
+setup_firewall() {
+    step "Configuring Firewall"
+    
+    # Check if ufw is available
+    if command -v ufw > /dev/null 2>&1; then
+        info "Configuring UFW firewall..."
+        
+        # Allow SSH
+        ufw allow 22/tcp
+        
+        # Allow HTTP/HTTPS
+        ufw allow 80/tcp
+        ufw allow 443/tcp
+        
+        # Allow API port
+        ufw allow 8000/tcp
+        
+        # Enable firewall
+        echo "y" | ufw enable
+        
+        log "Firewall configured"
+    else
+        warn "UFW not installed, skipping firewall configuration"
     fi
 }
 
 # Setup log rotation
 setup_log_rotation() {
-    info "Setting up log rotation..."
+    step "Setting up Log Rotation"
+    
+    APP_DIR="/var/www/news-aggregator-api"
+    USER="www-data"
     
     cat > /etc/logrotate.d/news-api << EOF
 $APP_DIR/logs/*.log {
@@ -613,50 +776,73 @@ EOF
 
 # Create update script
 create_update_script() {
-    info "Creating update script..."
+    step "Creating Update Script"
     
-    cat > "$APP_DIR/update.sh" << EOF
+    APP_DIR="/var/www/news-aggregator-api"
+    VENV_DIR="$APP_DIR/venv"
+    
+    cat > "$APP_DIR/update.sh" << 'EOF'
 #!/bin/bash
 
 # News Aggregator API Update Script
 
 set -e
 
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
 echo ""
-echo "╔══════════════════════════════════════════════╗"
-echo "║      News Aggregator API - Update           ║"
-echo "╚══════════════════════════════════════════════╝"
+echo -e "${BLUE}╔══════════════════════════════════════════════╗${NC}"
+echo -e "${BLUE}║${NC}      News Aggregator API - Update           ${BLUE}║${NC}"
+echo -e "${BLUE}╚══════════════════════════════════════════════╝${NC}"
 echo ""
 
-cd $APP_DIR
+APP_DIR="/var/www/news-aggregator-api"
+VENV_DIR="$APP_DIR/venv"
 
-echo "📥 Pulling latest changes from GitHub..."
+cd "$APP_DIR"
+
+echo -e "${YELLOW}[1/4]${NC} Pulling latest changes from GitHub..."
 if git pull origin main; then
-    echo "✓ Repository updated"
+    echo -e "${GREEN}✓ Repository updated${NC}"
 else
-    echo "✗ Failed to pull changes"
+    echo -e "${RED}✗ Failed to pull changes${NC}"
     exit 1
 fi
 
 echo ""
-echo "🐍 Updating Python dependencies..."
+echo -e "${YELLOW}[2/4]${NC} Updating Python dependencies..."
 source $VENV_DIR/bin/activate
 if pip install -r requirements.txt; then
-    echo "✓ Dependencies updated"
+    echo -e "${GREEN}✓ Dependencies updated${NC}"
 else
-    echo "✗ Failed to install dependencies"
+    echo -e "${RED}✗ Failed to install dependencies${NC}"
     exit 1
 fi
 
 echo ""
-echo "🔄 Restarting services..."
+echo -e "${YELLOW}[3/4]${NC} Restarting services..."
 systemctl restart news-api
 systemctl restart news-worker
 systemctl restart news-scheduler
 
 echo ""
-echo "✅ Update completed successfully!"
-echo "   Time: \$(date)"
+echo -e "${YELLOW}[4/4]${NC} Checking service status..."
+for service in news-api news-worker news-scheduler; do
+    if systemctl is-active --quiet "$service"; then
+        echo -e "${GREEN}✓ $service is running${NC}"
+    else
+        echo -e "${RED}✗ $service is not running${NC}"
+    fi
+done
+
+echo ""
+echo -e "${GREEN}✅ Update completed successfully!${NC}"
+echo -e "   Time: $(date)"
 echo ""
 EOF
     
@@ -664,90 +850,79 @@ EOF
     log "Update script created: $APP_DIR/update.sh"
 }
 
-# Create environment file
-create_env_file() {
-    info "Creating environment configuration..."
-    
-    local api_key="MAX_Nwstdy21onetwditwdi6"
-    
-    cat > "$APP_DIR/.env" << EOF
-# API Configuration
-API_KEY=$api_key
-API_KEY_NAME=X-API-Key
-SECRET_KEY=$(openssl rand -hex 32)
-DEBUG=False
-
-# Database
-DATABASE_URL=sqlite:///$APP_DIR/news.db
-
-# Redis
-REDIS_URL=redis://localhost:6379/0
-
-# AI Configuration
-OPENAI_API_KEY=your-openai-api-key-here
-OPENAI_MODEL=gpt-3.5-turbo-1106
-AI_SUMMARIZE=True
-
-# Storage Paths
-MEDIA_STORAGE_PATH=$APP_DIR/storage/media
-CACHE_PATH=$APP_DIR/storage/cache
-
-# Server
-HOST=0.0.0.0
-PORT=8000
-DOMAIN=https://$DOMAIN
-
-# Settings
-FETCH_DELAY=1.0
-MAX_CONCURRENT_FETCHES=5
-EOF
-    
-    chown $USER:$USER "$APP_DIR/.env"
-    chmod 600 "$APP_DIR/.env"
-    
-    log "Environment file created"
-}
-
-# Start and enable services
+# Start services
 start_services() {
-    info "Starting and enabling services..."
+    step "Starting Services"
     
-    systemctl daemon-reload
+    info "Starting Redis..."
+    systemctl restart redis-server
+    sleep 2
+    
+    info "Starting API..."
+    systemctl restart news-api
+    sleep 2
+    
+    info "Starting worker..."
+    systemctl restart news-worker
+    sleep 2
+    
+    info "Starting scheduler..."
+    systemctl restart news-scheduler
+    sleep 2
     
     # Enable services to start on boot
-    systemctl enable redis-server
-    systemctl enable news-api
-    systemctl enable news-worker
-    systemctl enable news-scheduler
+    systemctl enable redis-server news-api news-worker news-scheduler
     
-    # Start services
-    log "Starting Redis..."
-    systemctl restart redis-server
-    
-    log "Starting News API..."
-    systemctl restart news-api
-    
-    log "Starting Celery worker..."
-    systemctl restart news-worker
-    
-    log "Starting scheduler..."
-    systemctl restart news-scheduler
-    
-    log "Starting Nginx..."
-    systemctl restart nginx
-    
-    # Wait a moment for services to start
-    sleep 3
+    log "All services started"
 }
 
-# Display final information
-display_final_info() {
+# Verify installation
+verify_installation() {
+    step "Verifying Installation"
+    
+    info "Checking service status..."
+    local all_running=true
+    
+    for service in redis-server news-api news-worker news-scheduler nginx; do
+        if systemctl is-active --quiet "$service"; then
+            echo -e "  ${GREEN}✓${NC} $service is running"
+        else
+            echo -e "  ${RED}✗${NC} $service is not running"
+            all_running=false
+        fi
+    done
+    
+    if [ "$all_running" = true ]; then
+        log "All services are running"
+    else
+        warn "Some services are not running. Check logs with: journalctl -u service-name"
+    fi
+    
+    # Test API endpoint
+    info "Testing API endpoint..."
+    sleep 5  # Give services time to fully start
+    
+    if [ "$NO_SSL" = true ]; then
+        local test_url="http://$DOMAIN/health"
+    else
+        local test_url="https://$DOMAIN/health"
+    fi
+    
+    if curl -s --max-time 10 "$test_url" | grep -q "healthy"; then
+        log "API health check passed"
+    else
+        warn "API health check failed. API might need more time to start."
+    fi
+}
+
+# Display completion message
+display_completion() {
     echo ""
-    success "Deployment completed successfully!"
+    success "DEPLOYMENT COMPLETED SUCCESSFULLY!"
     echo ""
-    echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
-    echo -e "${BOLD}📡 API Endpoints:${NC}"
-    echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}📡 ACCESS INFORMATION${NC}"
+    echo -e "${CYAN}════════════════════════════════════════════════════════════${NC}"
     
     if [ "$NO_SSL" = true ]; then
         echo -e "  ${BOLD}API URL:${NC}      http://$DOMAIN/api/v1/"
@@ -758,42 +933,42 @@ display_final_info() {
     fi
     
     echo ""
-    echo -e "${YELLOW}🔑 Authentication:${NC}"
-    echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}🔑 SECURITY INFORMATION${NC}"
+    echo -e "${CYAN}════════════════════════════════════════════════════════════${NC}"
     echo -e "  ${BOLD}API Key:${NC}        $API_KEY"
     echo -e "  ${BOLD}Header:${NC}         X-API-Key: $API_KEY"
-    echo ""
     
-    echo -e "${YELLOW}📊 Services Status:${NC}"
-    echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
-    
-    for service in redis-server news-api news-worker news-scheduler nginx; do
-        if systemctl is-active --quiet "$service"; then
-            echo -e "  ${GREEN}✓${NC} $service is ${GREEN}running${NC}"
-        else
-            echo -e "  ${RED}✗${NC} $service is ${RED}not running${NC}"
-        fi
-    done
+    if [ "$OPENAI_API_KEY" = "your-openai-api-key-here" ]; then
+        echo -e "  ${BOLD}OpenAI Key:${NC}    ${YELLOW}Not configured - AI summarization disabled${NC}"
+        echo -e "  ${BOLD}To enable AI:${NC}  Edit /var/www/news-aggregator-api/.env"
+    else
+        echo -e "  ${BOLD}OpenAI Key:${NC}    ${GREEN}Configured - AI summarization enabled${NC}"
+    fi
     
     echo ""
-    echo -e "${YELLOW}🛠️  Management Commands:${NC}"
-    echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}🛠️  MANAGEMENT COMMANDS${NC}"
+    echo -e "${CYAN}════════════════════════════════════════════════════════════${NC}"
     echo -e "  ${BOLD}Check logs:${NC}       journalctl -u news-api -f"
-    echo -e "  ${BOLD}Update API:${NC}       $APP_DIR/update.sh"
+    echo -e "  ${BOLD}Update API:${NC}       /var/www/news-aggregator-api/update.sh"
     echo -e "  ${BOLD}Restart all:${NC}      systemctl restart news-api news-worker news-scheduler"
     echo -e "  ${BOLD}View status:${NC}      systemctl status news-api"
     
     echo ""
-    echo -e "${YELLOW}📁 Important Paths:${NC}"
-    echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
-    echo -e "  ${BOLD}App Directory:${NC}    $APP_DIR"
-    echo -e "  ${BOLD}Logs:${NC}             $APP_DIR/logs/"
-    echo -e "  ${BOLD}Database:${NC}         $APP_DIR/news.db"
-    echo -e "  ${BOLD}Media Storage:${NC}    $APP_DIR/storage/media/"
+    echo -e "${CYAN}════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}📁 IMPORTANT PATHS${NC}"
+    echo -e "${CYAN}════════════════════════════════════════════════════════════${NC}"
+    echo -e "  ${BOLD}App Directory:${NC}    /var/www/news-aggregator-api"
+    echo -e "  ${BOLD}Logs:${NC}             /var/www/news-aggregator-api/logs/"
+    echo -e "  ${BOLD}Database:${NC}         /var/www/news-aggregator-api/news.db"
+    echo -e "  ${BOLD}Config:${NC}           /var/www/news-aggregator-api/.env"
+    echo -e "  ${BOLD}Media Storage:${NC}    /var/www/news-aggregator-api/storage/media/"
     
     echo ""
-    echo -e "${YELLOW}🚀 Quick Test:${NC}"
-    echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}🚀 QUICK TEST${NC}"
+    echo -e "${CYAN}════════════════════════════════════════════════════════════${NC}"
     
     if [ "$NO_SSL" = true ]; then
         echo -e "  ${BOLD}Test API:${NC} curl -H 'X-API-Key: $API_KEY' http://$DOMAIN/api/v1/system/status"
@@ -802,93 +977,49 @@ display_final_info() {
     fi
     
     echo ""
-    echo -e "${GREEN}✅ Setup complete! Your News Aggregator API is ready to use.${NC}"
+    echo -e "${GREEN}✅ Your News Aggregator API is now live and ready to use!${NC}"
     echo ""
+    
+    if [ "$NO_SSL" = true ] && [ "$SETUP_SSL" != true ]; then
+        echo -e "${YELLOW}⚠  REMINDER: SSL is not configured. To add SSL later:${NC}"
+        echo -e "  1. Ensure DNS points to: ${BOLD}$VPS_PUBLIC_IP${NC}"
+        echo -e "  2. Run: ${BOLD}certbot --nginx -d $DOMAIN${NC}"
+        echo ""
+    fi
 }
 
-# Main deployment function
+# Main execution
 main() {
-    clear
     header
     
-    # Variables
-    APP_NAME="news-aggregator-api"
-    APP_DIR="/var/www/$APP_NAME"
-    VENV_DIR="$APP_DIR/venv"
-    USER="www-data"
-    GITHUB_REPO="https://github.com/maxieyy/news-aggregator-api.git"
-    API_KEY="MAX_Nwstdy21onetwditwdi6"
-    
-    # Initialize variables
-    VPS_PUBLIC_IP=""
-    VPS_PRIVATE_IP=""
-    SELECTED_DOMAIN=""
-    DOMAIN=""
-    NO_SSL=false
-    SETUP_SSL=false
-    SSL_CERT_PATH=""
-    
-    # Check root privileges
+    # Check root
     check_root
     
-    # Detect IP addresses
-    detect_ip
+    # Detect system
+    detect_system
     
-    # Check for existing SSL certificates
-    check_ssl
+    # Check for conflicts
+    check_existing_services
     
-    # Get domain configuration
-    get_domain
+    # Get configuration
+    get_configuration
+    
+    echo ""
+    echo -e "${GREEN}Starting deployment process...${NC}"
+    echo ""
     
     # Installation steps
-    echo ""
-    info "Starting installation process..."
-    echo ""
-    
-    # Step 1: Install dependencies
-    echo -e "${CYAN}[1/9]${NC} Installing system dependencies..."
     install_dependencies
-    
-    # Step 2: Setup SSL
-    echo -e "${CYAN}[2/9]${NC} Configuring SSL..."
-    setup_ssl_certificate
-    
-    # Step 3: Clone repository
-    echo -e "${CYAN}[3/9]${NC} Setting up repository..."
-    setup_repository
-    
-    # Step 4: Setup Python environment
-    echo -e "${CYAN}[4/9]${NC} Setting up Python environment..."
-    setup_python_env
-    
-    # Step 5: Create directories
-    echo -e "${CYAN}[5/9]${NC} Creating directories..."
-    setup_directories
-    
-    # Step 6: Create environment file
-    echo -e "${CYAN}[6/9]${NC} Creating configuration..."
-    create_env_file
-    
-    # Step 7: Create systemd services
-    echo -e "${CYAN}[7/9]${NC} Creating services..."
-    create_systemd_services
-    
-    # Step 8: Configure Nginx
-    echo -e "${CYAN}[8/9]${NC} Configuring Nginx..."
+    setup_ssl
+    setup_application
+    configure_services
     configure_nginx
-    
-    # Step 9: Setup log rotation
-    echo -e "${CYAN}[9/9]${NC} Finalizing setup..."
+    setup_firewall
     setup_log_rotation
-    
-    # Create update script
     create_update_script
-    
-    # Start services
     start_services
-    
-    # Display final information
-    display_final_info
+    verify_installation
+    display_completion
 }
 
 # Run main function
